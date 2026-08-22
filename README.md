@@ -1,0 +1,2 @@
+# squat
+exercies app
