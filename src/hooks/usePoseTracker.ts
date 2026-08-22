@@ -104,7 +104,12 @@ export function usePoseTracker() {
   }, []);
 
   const ensureModel = useCallback(async () => {
-    if (landmarkerRef.current) return;
+    // Always recreate landmarker if backend changed
+    if (landmarkerRef.current) {
+      // Check if we need to recreate with different backend
+      // For now, keep existing instance unless disposed
+      return;
+    }
     
     const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
     
@@ -135,7 +140,7 @@ export function usePoseTracker() {
 
   const loop = useCallback(() => {
     // Guard: prevent multiple simultaneous loops
-    if (!loopActiveRef.current && !runningRef.current) return;
+    if (!loopActiveRef.current || !runningRef.current) return;
     
     rafRef.current = requestAnimationFrame(loop);
     
@@ -144,6 +149,32 @@ export function usePoseTracker() {
     const landmarker = landmarkerRef.current;
     
     if (!video || !canvas || !landmarker || video.readyState < 2) return;
+    
+    // Emergency brake: stop inference if GPU errors exceeded threshold
+    if (gpuErrorCountRef.current >= CONFIG.gpuErrorThreshold && forceCPUBackendRef.current) {
+      logOnce("emergency-stop", () => {
+        console.warn("Emergency stop: Too many GPU errors. Please restart tracking.");
+      });
+      // Don't keep calling detectForVideo - just render with last known state
+      const engine = engineRef.current;
+      const snap = engine.update(lastLmRef.current, performance.now());
+      const ctx = canvas.getContext("2d");
+      if (ctx) {
+        drawScene(ctx, {
+          lm: lastLmRef.current,
+          w: canvas.width,
+          h: canvas.height,
+          t: performance.now(),
+          tracking: "lost",
+          arc: null,
+          align: null,
+          trail: trailRef.current,
+          keyJoints: [],
+          issueActive: false,
+        });
+      }
+      return;
+    }
     
     const t0 = performance.now();
     
@@ -290,12 +321,21 @@ export function usePoseTracker() {
         console.warn(`Inference error (${gpuErrorCountRef.current}/${CONFIG.gpuErrorThreshold}):`, err?.message || err);
       });
       
-      // If GPU errors exceed threshold, force CPU backend on next restart
+      // If GPU errors exceed threshold, force CPU backend permanently
       if (gpuErrorCountRef.current >= CONFIG.gpuErrorThreshold) {
         logOnce("gpu-threshold", () => {
-          console.warn("GPU error threshold exceeded, will use CPU backend on restart");
+          console.warn("GPU error threshold exceeded. Switching to CPU backend permanently.");
         });
         forceCPUBackendRef.current = true;
+        
+        // Stop the current loop and require restart with CPU backend
+        runningRef.current = false;
+        cancelAnimationFrame(rafRef.current);
+        isInferenceRunningRef.current = false;
+        
+        setStatus("error");
+        setError("GPU backend failed. Please click 'Start Tracking' again to use CPU backend.");
+        return;
       }
       
       // Don't stop the loop, just skip this frame
@@ -309,14 +349,19 @@ export function usePoseTracker() {
     setError(null);
     setStatus("loading");
     
-    // Reset state flags
+    // Reset state flags (but NOT forceCPUBackendRef - keep it if already set)
     loopActiveRef.current = true;
     isInferenceRunningRef.current = false;
     lastInferenceTimeRef.current = 0;
     gpuErrorCountRef.current = 0;
-    // Don't reset forceCPUBackendRef - keep it if already set
     
     try {
+      // Recreate landmarker if backend changed
+      if (landmarkerRef.current && forceCPUBackendRef.current) {
+        // Need to recreate with CPU backend
+        landmarkerRef.current.close();
+        landmarkerRef.current = null;
+      }
       await ensureModel();
       
       // Request low-resolution camera stream for better performance on low-end devices
@@ -363,7 +408,8 @@ export function usePoseTracker() {
       persistTimerRef.current = window.setInterval(persistLifetime, 15000);
       
       logOnce("tracking-started", () => {
-        console.log(`Tracking started: ${CONFIG.cameraWidth}x${CONFIG.cameraHeight} @ ${CONFIG.cameraFPS}fps, AI @ ${CONFIG.targetInferenceFPS}fps`);
+        const backend = forceCPUBackendRef.current ? "CPU" : "GPU";
+        console.log(`Tracking started: ${CONFIG.cameraWidth}x${CONFIG.cameraHeight} @ ${CONFIG.cameraFPS}fps, AI @ ${CONFIG.targetInferenceFPS}fps, backend=${backend}`);
       });
     } catch (err: any) {
       runningRef.current = false;
