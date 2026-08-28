@@ -218,19 +218,26 @@ export function usePoseTracker() {
     isInferenceRunningRef.current = true;
     lastInferenceTimeRef.current = t0;
     
+    let lm: Pt[] | null = null;
+    
     try {
       // Set canvas size based on video (low-resolution for performance)
       const targetWidth = Math.min(video.videoWidth || CONFIG.cameraWidth, CONFIG.cameraWidth);
       const targetHeight = Math.min(video.videoHeight || CONFIG.cameraHeight, CONFIG.cameraHeight);
+      
+      // Skip if video dimensions are not yet available
+      if (targetWidth <= 0 || targetHeight <= 0) {
+        return;
+      }
       
       if (canvas.width !== targetWidth || canvas.height !== targetHeight) {
         canvas.width = targetWidth;
         canvas.height = targetHeight;
       }
       
-      // Run pose detection
+      // Run pose detection with proper error handling
       const res = landmarker.detectForVideo(video, t0);
-      const lm = (res.landmarks && res.landmarks[0]) || null;
+      lm = (res && res.landmarks && res.landmarks[0]) || null;
       lastLmRef.current = lm;
       
       const engine = engineRef.current;
@@ -338,8 +345,8 @@ export function usePoseTracker() {
         return;
       }
       
-      // Don't stop the loop, just skip this frame
-      // The engine will handle missing landmarks gracefully
+      // Continue the loop but skip processing for this frame
+      // The engine will handle missing landmarks gracefully on next successful frame
     } finally {
       isInferenceRunningRef.current = false;
     }
